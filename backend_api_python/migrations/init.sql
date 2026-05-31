@@ -397,6 +397,30 @@ CREATE TABLE IF NOT EXISTS qd_grid_cells (
 CREATE INDEX IF NOT EXISTS idx_grid_cells_strategy ON qd_grid_cells(strategy_id);
 CREATE INDEX IF NOT EXISTS idx_grid_cells_state ON qd_grid_cells(strategy_id, state);
 
+CREATE TABLE IF NOT EXISTS qd_grid_resting_orders (
+    id SERIAL PRIMARY KEY,
+    strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
+    symbol VARCHAR(50) NOT NULL,
+    cell_index INTEGER NOT NULL DEFAULT 0,
+    purpose VARCHAR(24) NOT NULL,
+    side VARCHAR(8) NOT NULL,
+    pos_side VARCHAR(8) NOT NULL DEFAULT '',
+    reduce_only BOOLEAN NOT NULL DEFAULT FALSE,
+    price DECIMAL(24, 8) NOT NULL,
+    quantity DECIMAL(24, 8) NOT NULL DEFAULT 0,
+    quote_amount DECIMAL(24, 8) NOT NULL DEFAULT 0,
+    client_order_id VARCHAR(64) NOT NULL DEFAULT '',
+    exchange_order_id VARCHAR(64) NOT NULL DEFAULT '',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    filled_quantity DECIMAL(24, 8) NOT NULL DEFAULT 0,
+    avg_fill_price DECIMAL(24, 8) NOT NULL DEFAULT 0,
+    processed_fill_qty DECIMAL(24, 8) NOT NULL DEFAULT 0,
+    extra JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_grid_resting_strategy ON qd_grid_resting_orders(strategy_id, status);
+
 -- =============================================================================
 -- 5. Pending Orders Queue
 -- =============================================================================

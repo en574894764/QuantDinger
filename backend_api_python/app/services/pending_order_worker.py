@@ -1251,6 +1251,8 @@ class PendingOrderWorker:
             _console_print(f"[worker] create_client_failed: strategy_id={strategy_id} pending_id={order_id} err={e}")
             _notify_live_best_effort(status="failed", error=f"create_client_failed:{e}")
             append_strategy_log(strategy_id, "error", f"Exchange client creation failed ({exchange_id}): {e}")
+            if is_fatal_exchange_error(str(e)):
+                auto_stop_live_strategy(int(strategy_id), str(e), source="pending_order_client")
             return
 
         # Check if this is an IBKR client (US stocks)
