@@ -802,6 +802,8 @@ def get_trades():
         # the stored wall clock is UTC. Naive datetime must not use .timestamp() alone — that would
         # interpret it in the Python process local TZ and shift the instant (e.g. +8h on CN laptops).
         from datetime import datetime as _dt, timezone as _tz
+        from app.utils.trade_close_reason import enrich_trade_row
+        from app.utils.trade_net_pnl import enrich_trades_net_pnl
         processed_rows = []
         for row in rows:
             trade = dict(row)
@@ -820,8 +822,6 @@ def get_trades():
                         trade['created_at'] = int(dt.timestamp())
                     except Exception:
                         pass
-            from app.utils.trade_close_reason import enrich_trade_row
-            from app.utils.trade_net_pnl import enrich_trades_net_pnl
 
             trade = enrich_trade_row(trade, bot_type=bot_type, lang=lang)
             processed_rows.append(trade)

@@ -1274,13 +1274,27 @@ class TradingExecutor:
             leverage = 1.0
         market_type = str((trading_config or {}).get('market_type') or 'swap').lower()
 
-        def _to_local_qty(usdt_or_ratio: float, ref_price: float) -> float:
-            if ref_price is None or ref_price <= 0 or usdt_or_ratio is None or usdt_or_ratio <= 0:
+        def _to_local_qty(value: float, ref_price: float, *, from_order_amount: bool) -> float:
+            if ref_price is None or ref_price <= 0 or value is None or value <= 0:
                 return 0.0
-            if is_bot_script and float(usdt_or_ratio) > 1.0:
+            if is_bot_script and from_order_amount:
                 lev = leverage if market_type != 'spot' else 1.0
-                return float(usdt_or_ratio) * lev / float(ref_price)
-            return float(usdt_or_ratio)
+                return float(value) * lev / float(ref_price)
+            if is_bot_script and float(value) > 1.0:
+                lev = leverage if market_type != 'spot' else 1.0
+                return float(value) * lev / float(ref_price)
+            return float(value)
+
+        def _script_quote_extra() -> Dict[str, Any]:
+            """Bot scripts pass quote notional via ctx.buy/sell(amount=...)."""
+            if (not is_bot_script) or raw_amt is None:
+                return {}
+            try:
+                if float(raw_amt) > 0:
+                    return {'script_quote_amount': float(raw_amt)}
+            except Exception:
+                pass
+            return {}
 
         def _script_qty_extra() -> Dict[str, Any]:
             """Non-bot scripts pass base-asset qty via ctx.buy/sell; honor it live like backtest."""
@@ -1296,6 +1310,7 @@ class TradingExecutor:
         def _emit(sig: Dict[str, Any], reason_override: Optional[str]) -> None:
             if reason_override:
                 sig.setdefault('reason', reason_override)
+            sig.update(_script_quote_extra())
             sig.update(_script_qty_extra())
             out.append(sig)
 
@@ -1317,7 +1332,7 @@ class TradingExecutor:
                 except Exception:
                     pass
             ref_px = order_price if order_price > 0 else trig
-            local_qty = _to_local_qty(pos_ratio, ref_px)
+            local_qty = _to_local_qty(pos_ratio, ref_px, from_order_amount=(raw_amt is not None))
 
             if action == 'close':
                 # Legacy ctx.close_position() — closes whichever leg is dominant.
@@ -1957,7 +1972,7 @@ class TradingExecutor:
                 exchange_id=kline_exchange_id, market_type=kline_market_type,
             )
             if not klines or len(klines) < 2:
-                _abort_loop("failed to fetch K-lines (need at least 2 bars)")
+                _abort_loop(f"failed to fetch K-lines for {market_category}:{symbol} {timeframe} via {kline_exchange_id or 'default'}/{kline_market_type or 'default'} (need at least 2 bars)")
                 return
             logger.info(rf'Strategy {strategy_id} history kline number: {len(klines)}')
             
@@ -2751,6 +2766,7 @@ class TradingExecutor:
                                 signal_reason=selected.get("reason"),
                                 trailing_stop_price=selected.get("trailing_stop_price"),
                                 script_base_qty=selected.get("script_base_qty"),
+                                script_quote_amount=selected.get("script_quote_amount"),
                             )
                             if ok:
                                 logger.info(f"Strategy {strategy_id} signal executed: {signal_type} @ {execute_price}")
@@ -4138,6 +4154,7 @@ class TradingExecutor:
         signal_ts: int = 0,
         price_exchange_id: Optional[str] = None,
         script_base_qty: Optional[float] = None,
+        script_quote_amount: Optional[float] = None,
     ):
         """执行具体的交易信号"""
         try:
@@ -4307,10 +4324,18 @@ class TradingExecutor:
                 )
             except Exception:
                 explicit_script_qty = None
+            try:
+                explicit_script_quote = (
+                    float(script_quote_amount)
+                    if script_quote_amount is not None and float(script_quote_amount) > 0
+                    else None
+                )
+            except Exception:
+                explicit_script_quote = None
 
             # Frontend position sizing alignment:
             # - non-bot open_* uses entry_pct from trading_config if provided
-            # - bot scripts pass their own amount/ratio from ctx.buy()/ctx.sell()
+            # - bot scripts pass quote notional from ctx.buy()/ctx.sell()
             # - script strategies with ctx.buy(price, qty) pass script_base_qty (base coins)
             entry_ratio_override = None
             cs_mode = (
@@ -4331,12 +4356,20 @@ class TradingExecutor:
 
             # Open / add sizing
             if ('open' in sig or 'add' in sig):
-                 if explicit_script_qty is not None and not is_bot_script:
+                 if explicit_script_quote is not None and is_bot_script:
+                     if current_price > 0:
+                         if market_type == 'spot':
+                             from app.services.live_trading.spot_sizing import scale_spot_open_notional
+                             quote_stake = scale_spot_open_notional(float(explicit_script_quote))
+                             amount = quote_stake / current_price
+                         else:
+                             amount = (float(explicit_script_quote) * leverage) / current_price
+                 elif explicit_script_qty is not None and not is_bot_script:
                      amount = explicit_script_qty
                  elif position_size is None or float(position_size) <= 0:
                      position_size = 0.05
 
-                 if explicit_script_qty is None and is_bot_script and float(position_size) > 1.0:
+                 if explicit_script_quote is None and explicit_script_qty is None and is_bot_script and float(position_size) > 1.0:
                      # Bot scripts pass amount as absolute USDT notional, not ratio.
                      usdt_notional = float(position_size)
                      if market_type == 'spot':
@@ -4345,7 +4378,7 @@ class TradingExecutor:
                          amount = usdt_notional / current_price
                      else:
                          amount = (usdt_notional * leverage) / current_price
-                 elif explicit_script_qty is None:
+                 elif explicit_script_quote is None and explicit_script_qty is None:
                      use_code_ratios = bool(self._code_strategy_cfg(trading_config))
                      if use_code_ratios and sig in ("open_long", "open_short", "add_long", "add_short"):
                          position_ratio = float(position_size)
@@ -4419,6 +4452,13 @@ class TradingExecutor:
 
             if amount <= 0 and ('open' in signal_type or 'add' in signal_type):
                 return False
+
+            if (explicit_script_qty is not None or explicit_script_quote is not None) and ('open' in sig or 'add' in sig) and current_price > 0:
+                requested_notional = float(amount or 0.0) * float(current_price or 0.0)
+                max_notional = float(available_capital or 0.0) * (float(leverage or 1.0) if market_type != 'spot' else 1.0)
+                if max_notional > 0 and requested_notional > max_notional * 1.000001:
+                    append_strategy_log(strategy_id, "info", f"Risk: script order amount exceeds capital ({requested_notional:.2f} > {max_notional:.2f}); check quote/base sizing")
+                    return False
             
             bot_order_mode = (trading_config or {}).get('order_mode') or None
             order_result = self._execute_exchange_order(

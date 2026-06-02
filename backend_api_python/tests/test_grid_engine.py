@@ -112,6 +112,34 @@ def test_initial_market_target_qty_100u_20pct_20x():
     assert make_grid_initial_client_order_id(42, leg="long") != make_grid_initial_client_order_id(42, leg="short")
 
 
+def test_grid_line_qty_uses_quote_amount_times_leverage():
+    from app.services.grid.engine import GridEngine
+
+    tc = {
+        "initial_capital": 100,
+        "leverage": 20,
+        "market_type": "swap",
+        "bot_params": {
+            "upperPrice": 80200,
+            "lowerPrice": 69800,
+            "gridCount": 24,
+            "amountPerGrid": 4,
+            "gridDirection": "long",
+            "initialPositionPct": 0,
+        },
+    }
+    engine = GridEngine(
+        42,
+        "BTC/USDT",
+        tc,
+        {},
+        create_client_fn=lambda: None,
+        enqueue_market=lambda *a, **k: False,
+    )
+
+    assert engine._grid_base_qty(72710.0) == pytest.approx(4.0 * 20.0 / 72710.0, rel=1e-4)
+
+
 def test_initial_market_recovers_from_exchange_without_new_order(monkeypatch):
     from app.services.grid.engine import GridEngine
 
@@ -445,6 +473,83 @@ def test_sync_exit_coverage_skips_when_position_below_one_grid(monkeypatch):
     assert placed == []
 
 
+def test_sync_exit_coverage_does_not_cover_held_cell_with_active_price_cell(monkeypatch):
+    from app.services.grid.engine import GridEngine
+    from app.services.grid.levels import generate_cells, generate_levels
+    from app.services.live_trading.grid_cells import GridCell, GridCellState
+
+    tc = {
+        "initial_capital": 1000,
+        "leverage": 2,
+        "market_type": "swap",
+        "bot_params": {
+            "upperPrice": 758,
+            "lowerPrice": 588,
+            "gridCount": 24,
+            "amountPerGrid": 20,
+            "gridDirection": "long",
+            "initialPositionPct": 20,
+        },
+    }
+    placed = []
+    levels = generate_levels(588, 758, 24, "arithmetic")
+    cells = generate_cells(levels)
+    held = GridCell(
+        strategy_id=9,
+        symbol="BNB/USDT",
+        cell_index=11,
+        lower_price=cells[11].lower_price,
+        upper_price=cells[11].upper_price,
+        state=GridCellState.LONG_HELD,
+        leg_size=0.05,
+        leg_entry_price=669.3,
+    )
+
+    class FakeOrders:
+        def list_open(self, strategy_id):
+            return []
+
+        def has_open_for_cell(self, strategy_id, cell_index, purpose):
+            return False
+
+    class FakeCells:
+        def list_cells(self, strategy_id, symbol=None):
+            return [held]
+
+    def fake_place(self, *args, **kwargs):
+        placed.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr("app.services.grid.engine.append_strategy_log", lambda *a, **k: None)
+    monkeypatch.setattr("app.services.grid.engine.GridEngine._place_limit", fake_place)
+    monkeypatch.setattr("app.services.grid.engine.GridEngine._leg_position_qty", lambda self, side: 0.05)
+    monkeypatch.setattr("app.services.grid.engine.GridEngine._dedupe_open_exit_orders", lambda self, p: None)
+    monkeypatch.setattr(
+        "app.services.grid.engine.GridEngine._levels_and_cells",
+        lambda self: (levels, cells),
+    )
+
+    engine = GridEngine(
+        9,
+        "BNB/USDT",
+        tc,
+        {},
+        create_client_fn=lambda: object(),
+        enqueue_market=lambda *a, **k: False,
+    )
+    engine._bootstrapped = True
+    engine._orders = FakeOrders()
+    engine._cells = FakeCells()
+
+    assert engine.sync_exit_coverage(669.3) == 1
+    assert len(placed) == 1
+    # The only allowed action is to repair the held cell's own TP, not to
+    # sell the position at the current price's lower active cell.
+    assert placed[0][0][1] == "long_exit"
+    assert placed[0][0][0].index == 11
+    assert placed[0][0][3] == pytest.approx(cells[11].upper_price)
+
+
 def test_run_initial_market_stops_when_okx_net_position_exists(monkeypatch):
     from app.services.grid.engine import GridEngine
 
@@ -676,4 +781,228 @@ def test_on_order_filled_long_entry_marks_held_even_if_exit_hangs(monkeypatch):
     engine.on_order_filled(order, 0.05, 691.4)
     assert len(updates) == 1
     assert updates[0]["state"] == GridCellState.LONG_HELD
+
+
+def test_on_order_filled_long_exit_rehangs_entry_immediately(monkeypatch):
+    from app.services.grid.engine import GridEngine
+    from app.services.grid.levels import GridCellSpec
+    from app.services.grid.resting_orders_repo import GridRestingOrder
+    from app.services.live_trading.grid_cells import GridCellState
+
+    tc = {"market_type": "swap", "bot_params": {"gridDirection": "long", "gridCount": 5}}
+    placed = []
+    state = {"value": GridCellState.LONG_HELD}
+
+    class FakeOrders:
+        def has_open_for_cell(self, strategy_id, cell_index, purpose):
+            return False
+
+    class FakeCells:
+        def update_state(self, *args, **kwargs):
+            state["value"] = kwargs["state"]
+
+    cell = GridCellSpec(index=1, lower_price=691.4, upper_price=691.5)
+    order = GridRestingOrder(
+        strategy_id=1,
+        symbol="BNB/USDT",
+        cell_index=1,
+        purpose="long_exit",
+        side="sell",
+        pos_side="long",
+        price=691.5,
+        quantity=0.05,
+    )
+
+    def fake_place(self, cell, purpose, side, price, *, reduce_only, pos_side, quantity=None):
+        placed.append(
+            {
+                "purpose": purpose,
+                "side": side,
+                "price": price,
+                "reduce_only": reduce_only,
+                "pos_side": pos_side,
+                "quantity": quantity,
+            }
+        )
+        state["value"] = GridCellState.BUY_OPEN
+        return True
+
+    monkeypatch.setattr("app.services.grid.engine.append_strategy_log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.services.grid.fill_handler.apply_grid_fill_to_local_state",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "app.services.grid.engine.GridEngine._levels_and_cells",
+        lambda self: ([], [cell]),
+    )
+    monkeypatch.setattr(
+        "app.services.grid.engine.GridEngine._cell_state_by_index",
+        lambda self: {1: state["value"]},
+    )
+    monkeypatch.setattr("app.services.grid.engine.GridEngine._place_limit", fake_place)
+
+    engine = GridEngine(
+        1,
+        "BNB/USDT",
+        tc,
+        {},
+        create_client_fn=lambda: object(),
+        enqueue_market=lambda *a, **k: False,
+    )
+    engine._orders = FakeOrders()
+    engine._cells = FakeCells()
+
+    engine.on_order_filled(order, 0.05, 691.5)
+    assert placed == [
+        {
+            "purpose": "long_entry",
+            "side": "buy",
+            "price": 691.4,
+            "reduce_only": False,
+            "pos_side": "long",
+            "quantity": 0.05,
+        }
+    ]
+    assert state["value"] == GridCellState.BUY_OPEN
+
+
+def test_on_order_filled_short_exit_rehangs_entry_immediately(monkeypatch):
+    from app.services.grid.engine import GridEngine
+    from app.services.grid.levels import GridCellSpec
+    from app.services.grid.resting_orders_repo import GridRestingOrder
+    from app.services.live_trading.grid_cells import GridCellState
+
+    tc = {"market_type": "swap", "bot_params": {"gridDirection": "short", "gridCount": 5}}
+    placed = []
+    state = {"value": GridCellState.SHORT_HELD}
+
+    class FakeOrders:
+        def has_open_for_cell(self, strategy_id, cell_index, purpose):
+            return False
+
+    class FakeCells:
+        def update_state(self, *args, **kwargs):
+            state["value"] = kwargs["state"]
+
+    cell = GridCellSpec(index=1, lower_price=691.4, upper_price=691.5)
+    order = GridRestingOrder(
+        strategy_id=1,
+        symbol="BNB/USDT",
+        cell_index=1,
+        purpose="short_exit",
+        side="buy",
+        pos_side="short",
+        price=691.4,
+        quantity=0.05,
+    )
+
+    def fake_place(self, cell, purpose, side, price, *, reduce_only, pos_side, quantity=None):
+        placed.append(
+            {
+                "purpose": purpose,
+                "side": side,
+                "price": price,
+                "reduce_only": reduce_only,
+                "pos_side": pos_side,
+                "quantity": quantity,
+            }
+        )
+        state["value"] = GridCellState.SELL_OPEN
+        return True
+
+    monkeypatch.setattr("app.services.grid.engine.append_strategy_log", lambda *a, **k: None)
+    monkeypatch.setattr(
+        "app.services.grid.fill_handler.apply_grid_fill_to_local_state",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "app.services.grid.engine.GridEngine._levels_and_cells",
+        lambda self: ([], [cell]),
+    )
+    monkeypatch.setattr(
+        "app.services.grid.engine.GridEngine._cell_state_by_index",
+        lambda self: {1: state["value"]},
+    )
+    monkeypatch.setattr("app.services.grid.engine.GridEngine._place_limit", fake_place)
+
+    engine = GridEngine(
+        1,
+        "BNB/USDT",
+        tc,
+        {},
+        create_client_fn=lambda: object(),
+        enqueue_market=lambda *a, **k: False,
+    )
+    engine._orders = FakeOrders()
+    engine._cells = FakeCells()
+
+    engine.on_order_filled(order, 0.05, 691.4)
+    assert placed == [
+        {
+            "purpose": "short_entry",
+            "side": "sell",
+            "price": 691.5,
+            "reduce_only": False,
+            "pos_side": "short",
+            "quantity": 0.05,
+        }
+    ]
+    assert state["value"] == GridCellState.SELL_OPEN
+
+
+def test_grid_fill_profit_uses_cell_entry_price(monkeypatch):
+    from app.services.grid import fill_handler
+    from app.services.grid.resting_orders_repo import GridRestingOrder
+    from app.services.live_trading.grid_cells import GridCell, GridCellState
+
+    cell = GridCell(
+        strategy_id=1,
+        symbol="BNB/USDT",
+        cell_index=11,
+        lower_price=669.3043,
+        upper_price=676.6957,
+        state=GridCellState.LONG_HELD,
+        leg_size=0.05,
+        leg_entry_price=669.3,
+    )
+    captured = {}
+
+    class FakeCellRepo:
+        def list_cells(self, strategy_id, symbol=None):
+            return [cell]
+
+    monkeypatch.setattr(fill_handler, "GridCellRepository", lambda: FakeCellRepo())
+    monkeypatch.setattr(fill_handler, "resolve_leg_context", lambda **kwargs: None)
+    monkeypatch.setattr(
+        fill_handler,
+        "apply_fill_to_local_position",
+        lambda **kwargs: (-0.99, None, 690.0),
+    )
+    monkeypatch.setattr(fill_handler, "record_trade", lambda **kwargs: captured.update(kwargs))
+
+    order = GridRestingOrder(
+        strategy_id=1,
+        symbol="BNB/USDT",
+        cell_index=11,
+        purpose="long_exit",
+        side="sell",
+        pos_side="long",
+        price=676.6957,
+        quantity=0.05,
+    )
+
+    fill_handler.apply_grid_fill_to_local_state(
+        1,
+        "BNB/USDT",
+        order,
+        0.05,
+        676.7,
+        {"market_type": "swap", "commission": 0},
+    )
+
+    expected = (676.7 - 669.3) * 0.05
+    assert captured["profit"] == pytest.approx(expected)
+    assert captured["grid_matched_profit"] == pytest.approx(expected)
+    assert captured["matched_entry_price"] == pytest.approx(669.3)
 

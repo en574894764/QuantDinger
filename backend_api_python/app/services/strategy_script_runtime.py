@@ -313,9 +313,11 @@ class ScriptPosition(dict):
 
 
 class StrategyScriptContext:
-    """与回测 ScriptBacktestContext 行为一致，供实盘按根推进。"""
+    """Live script context with behavior aligned to ScriptBacktestContext."""
 
-    def __init__(self, bars_df: pd.DataFrame, initial_balance: float):
+    def __init__(self, bars_df: Optional[pd.DataFrame] = None, initial_balance: float = 0.0):
+        if bars_df is None:
+            bars_df = pd.DataFrame(columns=["open", "high", "low", "close", "volume", "time"])
         self._bars_df = bars_df
         self._params: Dict[str, Any] = {}
         self._orders: List[Dict[str, Any]] = []

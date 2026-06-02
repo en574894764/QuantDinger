@@ -571,6 +571,25 @@ class GridEngine:
                 total += rem
         return total
 
+    def _held_cell_qty(self, direction: str) -> float:
+        """Quantity already assigned to held grid cells for the given leg."""
+        target_state = GridCellState.LONG_HELD if direction == "long" else GridCellState.SHORT_HELD
+        total = 0.0
+        try:
+            rows = self._cells.list_cells(self.strategy_id, self.symbol)
+        except Exception:
+            rows = []
+        for cell in rows or []:
+            if GridCellState.parse(getattr(cell, "state", "")) != target_state:
+                continue
+            try:
+                qty = float(getattr(cell, "leg_size", 0.0) or 0.0)
+            except Exception:
+                qty = 0.0
+            if qty > 0:
+                total += qty
+        return total
+
     def _open_orders_for_cell(self, cell_index: int, purpose: str) -> List[GridRestingOrder]:
         out: List[GridRestingOrder] = []
         for order in self._orders.list_open(self.strategy_id):
@@ -775,32 +794,41 @@ class GridEngine:
             return 0
 
         self._dedupe_open_exit_orders(purpose)
+        placed = self.sync_held_cell_exits(current_price)
 
         target_cell = self._active_cell_for_price(cells, current_price, direction)
         if not target_cell:
-            return 0
+            return placed
 
         px = float(
             (target_cell.upper_price if direction == "long" else target_cell.lower_price) or 0
         )
         if px <= 0:
-            return 0
+            return placed
 
         if self._orders.has_open_for_cell(self.strategy_id, target_cell.index, purpose):
-            return 0
+            return placed
 
         cell_states = self._cell_state_by_index()
         target_state = cell_states.get(int(target_cell.index), GridCellState.IDLE)
         if direction == "long" and target_state == GridCellState.LONG_HELD:
-            return 0
+            return placed
         if direction == "short" and target_state == GridCellState.SHORT_HELD:
-            return 0
+            return placed
 
         grid_qty = self._grid_base_qty(px)
         if grid_qty <= 0:
-            return 0
-        if pos_qty + 1e-8 < grid_qty:
-            return 0
+            return placed
+
+        # Active-cell exits are only for unassigned inventory, such as an
+        # initial market position recovered from the exchange. Do not use the
+        # current price's cell to cover quantities already represented by held
+        # cells or working exit orders; that can sell a normal grid fill at a
+        # near-entry price and turn a valid grid cycle into a fee loss.
+        covered_qty = max(self._held_cell_qty(direction), self._open_exit_qty(purpose))
+        uncovered_qty = max(0.0, float(pos_qty or 0.0) - float(covered_qty or 0.0))
+        if uncovered_qty + 1e-8 < grid_qty:
+            return placed
 
         ok = self._place_limit(
             target_cell,
@@ -836,9 +864,8 @@ class GridEngine:
                     state=GridCellState.SHORT_HELD,
                     leg_size=grid_qty,
                     leg_entry_price=current_price,
-                )
-            placed = 1
-        placed += self.sync_held_cell_exits(current_price)
+            )
+            placed += 1
         return placed
 
     def sync_initial_exit_orders(self, current_price: float) -> int:
@@ -1014,12 +1041,12 @@ class GridEngine:
                     f"Grid long_exit hang failed after entry fill cell={cell.index} @ {cell.upper_price:.4f}",
                 )
         elif purpose == "long_exit":
+            self._cells.update_state(self.strategy_id, self.symbol, cell.index, state=GridCellState.IDLE, leg_size=0)
             if not self._paused_entries:
                 if self._cell_allows_entry(cell.index, "long_entry", self._cell_state_by_index()):
                     self._place_limit(
                         cell, "long_entry", "buy", cell.lower_price, reduce_only=False, pos_side="long", quantity=fq
                     )
-            self._cells.update_state(self.strategy_id, self.symbol, cell.index, state=GridCellState.IDLE, leg_size=0)
         elif purpose == "short_entry":
             exit_ok = False
             if not self._orders.has_open_for_cell(self.strategy_id, cell.index, "short_exit"):
@@ -1036,12 +1063,12 @@ class GridEngine:
                     f"Grid short_exit hang failed after entry fill cell={cell.index} @ {cell.lower_price:.4f}",
                 )
         elif purpose == "short_exit":
+            self._cells.update_state(self.strategy_id, self.symbol, cell.index, state=GridCellState.IDLE, leg_size=0)
             if not self._paused_entries:
                 if self._cell_allows_entry(cell.index, "short_entry", self._cell_state_by_index()):
                     self._place_limit(
                         cell, "short_entry", "sell", cell.upper_price, reduce_only=False, pos_side="short", quantity=fq
                     )
-            self._cells.update_state(self.strategy_id, self.symbol, cell.index, state=GridCellState.IDLE, leg_size=0)
 
     def handle_boundary(self, current_price: float) -> None:
         upper, lower = self.cfg.effective_bounds(self._runtime_params)
