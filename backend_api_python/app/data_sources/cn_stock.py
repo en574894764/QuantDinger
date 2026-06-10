@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import os
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
 from app.data_sources.base import BaseDataSource
@@ -25,6 +27,93 @@ from app.data_sources.asia_stock_kline import (
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Local PG database query helpers
+
+_LOCAL_DB_URL = os.environ.get(
+    "QUANT_SYS_DATABASE_URL",
+    "postgresql://james@host.docker.internal:5432/investassist"
+)
+
+def _get_pg_conn():
+    """Lazy import psycopg2 and return a connection to the local PG."""
+    import psycopg2
+    import psycopg2.extras
+    return psycopg2.connect(_LOCAL_DB_URL)
+
+
+def _fetch_cn_kline_from_local_pg(
+    ts_code: str,
+    timeframe: str,
+    limit: int,
+    before_time: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Query daily_quote from local PostgreSQL.
+
+    Only supports 1D and 1W timeframes. Returns [] otherwise.
+    """
+    if timeframe not in ("1D", "1W"):
+        return []
+
+    try:
+        conn = _get_pg_conn()
+        cur = conn.cursor()
+    except Exception:
+        logger.debug("Local PG not reachable, skipping", exc_info=True)
+        return []
+
+    try:
+        # Build query
+        if before_time:
+            before_dt = datetime.fromtimestamp(before_time, tz=timezone.utc)
+            before_date = before_dt.strftime("%Y-%m-%d")
+            cur.execute(
+                """SELECT trade_date, open, high, low, close, vol
+                   FROM daily_quote
+                   WHERE ts_code = %s AND trade_date < %s
+                   ORDER BY trade_date DESC
+                   LIMIT %s""",
+                (ts_code, before_date, limit)
+            )
+        else:
+            cur.execute(
+                """SELECT trade_date, open, high, low, close, vol
+                   FROM daily_quote
+                   WHERE ts_code = %s
+                   ORDER BY trade_date DESC
+                   LIMIT %s""",
+                (ts_code, limit)
+            )
+
+        rows = cur.fetchall()
+        if not rows:
+            return []
+
+        out = []
+        for trade_date, open_p, high_p, low_p, close_p, vol in rows:
+            dt = datetime.combine(trade_date, datetime.min.time(), tzinfo=timezone.utc)
+            ts = int(dt.timestamp())
+            out.append({
+                "time": ts,
+                "open": float(open_p),
+                "high": float(high_p),
+                "low": float(low_p),
+                "close": float(close_p),
+                "volume": float(vol),
+            })
+
+        out.sort(key=lambda x: x["time"])
+        return out
+
+    except Exception:
+        logger.debug("Local PG query failed, falling through", exc_info=True)
+        return []
+    finally:
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
 
 
 class CNStockDataSource(BaseDataSource):
@@ -61,6 +150,19 @@ class CNStockDataSource(BaseDataSource):
         code = normalize_cn_code(symbol)
         tf = normalize_chart_timeframe(timeframe)
         lim = max(int(limit or 300), 1)
+
+        # Tier 0: Local PG / Parquet (fastest, most reliable for daily/weekly)
+        rows = _fetch_cn_kline_from_local_pg(
+            ts_code=code, timeframe=tf, limit=lim, before_time=before_time
+        )
+        if rows:
+            return self.filter_and_limit(
+                rows,
+                limit=lim,
+                before_time=before_time,
+                after_time=after_time,
+                truncate=(after_time is None),
+            )
 
         # Tier 1: Twelve Data (paid, most reliable)
         rows = fetch_twelvedata_klines(

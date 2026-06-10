@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import os
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
 
 from app.data_sources.base import BaseDataSource
@@ -25,6 +27,102 @@ from app.data_sources.asia_stock_kline import (
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ── Local PG helpers (hk_quote is in quant_sys DB, not investassist) ──
+
+_HK_PG_DB_URL = os.environ.get(
+    "QUANT_SYS_DATABASE_URL",
+    "postgresql://james@host.docker.internal:5432/investassist"
+).replace("/investassist", "/quant_sys")
+
+
+def _get_hk_pg_conn():
+    import psycopg2
+    import psycopg2.extras
+    return psycopg2.connect(_HK_PG_DB_URL)
+
+
+def _hk_code_to_pg_ts_code(tencent_code: str) -> str:
+    """Convert hk00700 → 00700.HK for DB query."""
+    if tencent_code.lower().startswith("hk") and tencent_code[2:].isdigit():
+        digits = tencent_code[2:]
+        return digits + ".HK"
+    return tencent_code
+
+
+def _fetch_hk_kline_from_local_pg(
+    tencent_code: str,
+    timeframe: str,
+    limit: int,
+    before_time: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Query hk_quote from local PostgreSQL (quant_sys DB).
+
+    Only supports 1D and 1W timeframes. Returns [] otherwise.
+    """
+    if timeframe not in ("1D", "1W"):
+        return []
+
+    ts_code = _hk_code_to_pg_ts_code(tencent_code)
+
+    try:
+        conn = _get_hk_pg_conn()
+        cur = conn.cursor()
+    except Exception:
+        logger.debug("Local PG not reachable for HK, skipping", exc_info=True)
+        return []
+
+    try:
+        if before_time:
+            before_dt = datetime.fromtimestamp(before_time, tz=timezone.utc)
+            before_date = before_dt.strftime("%Y-%m-%d")
+            cur.execute(
+                """SELECT trade_date, open, high, low, close, vol
+                   FROM hk_quote
+                   WHERE ts_code = %s AND trade_date < %s
+                   ORDER BY trade_date DESC
+                   LIMIT %s""",
+                (ts_code, before_date, limit)
+            )
+        else:
+            cur.execute(
+                """SELECT trade_date, open, high, low, close, vol
+                   FROM hk_quote
+                   WHERE ts_code = %s
+                   ORDER BY trade_date DESC
+                   LIMIT %s""",
+                (ts_code, limit)
+            )
+
+        rows = cur.fetchall()
+        if not rows:
+            return []
+
+        out = []
+        for trade_date, open_p, high_p, low_p, close_p, vol in rows:
+            dt = datetime.combine(trade_date, datetime.min.time(), tzinfo=timezone.utc)
+            ts = int(dt.timestamp())
+            out.append({
+                "time": ts,
+                "open": float(open_p),
+                "high": float(high_p),
+                "low": float(low_p),
+                "close": float(close_p),
+                "volume": float(vol),
+            })
+
+        out.sort(key=lambda x: x["time"])
+        return out
+
+    except Exception:
+        logger.debug("Local PG HK query failed, falling through", exc_info=True)
+        return []
+    finally:
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
 
 
 class HKStockDataSource(BaseDataSource):
@@ -61,6 +159,19 @@ class HKStockDataSource(BaseDataSource):
         code = normalize_hk_code(symbol)
         tf = normalize_chart_timeframe(timeframe)
         lim = max(int(limit or 300), 1)
+
+        # Tier 0: Local PG (quant_sys.hk_quote — fastest, most reliable for daily/weekly)
+        rows = _fetch_hk_kline_from_local_pg(
+            tencent_code=code, timeframe=tf, limit=lim, before_time=before_time
+        )
+        if rows:
+            return self.filter_and_limit(
+                rows,
+                limit=lim,
+                before_time=before_time,
+                after_time=after_time,
+                truncate=(after_time is None),
+            )
 
         # Tier 1: Twelve Data (paid, most reliable)
         rows = fetch_twelvedata_klines(
