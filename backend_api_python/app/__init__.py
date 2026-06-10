@@ -405,6 +405,85 @@ def create_app(config_name='default'):
 
     from app.routes import register_routes
     register_routes(app)
+    register_routes(app)
+    
+    # === quant_sys extension — A-share data/risk/strategy/signals ===
+    if os.getenv("QUANT_SYS_ENABLED", "").lower() in ("1", "true", "yes"):
+        # ── Attach extra routes to quant_bp BEFORE registration ──
+        from app.extensions.quant_sys import quant_bp
+        from app.extensions.quant_sys.backup import register_routes as register_backup
+        register_backup(quant_bp)
+        logger.info("quant_sys backup routes registered")
+
+        # ── Register the main blueprint ──
+        from app.extensions.quant_sys import init_app as quant_init
+        quant_init(app)
+        logger.info("quant_sys extension loaded")
+
+        # --- quant_sys sub-blueprints (macro / risk / strategy / portfolio) ---
+        from app.extensions.quant_sys.macro import init_app as macro_init
+        macro_init(app)
+        logger.info("quant_sys macro blueprint loaded")
+
+        from app.extensions.quant_sys.risk import init_app as risk_init
+        risk_init(app)
+        logger.info("quant_sys risk blueprint loaded")
+
+        from app.extensions.quant_sys.strategy import init_app as strategy_init
+        strategy_init(app)
+        logger.info("quant_sys strategy blueprint loaded")
+
+        from app.extensions.quant_sys.portfolio import init_app as portfolio_init
+        portfolio_init(app)
+        logger.info("quant_sys portfolio blueprint loaded")
+
+        from app.extensions.quant_sys.ideas import init_app as ideas_init
+        ideas_init(app)
+        logger.info("quant_sys ideas blueprint loaded")
+
+        from app.extensions.quant_sys.dashboard import init_app as dashboard_init
+        dashboard_init(app)
+        logger.info("quant_sys dashboard blueprint loaded")
+
+        # quant_sys index data refresh cron — daily 17:00 weekdays
+        from app.extensions.quant_sys.data.index_cron import register_index_cron
+        register_index_cron()
+        logger.info("quant_sys index refresh cron registered")
+
+        # quant_sys daily data pipeline cron — daily 17:05 weekdays
+        from app.extensions.quant_sys.data.daily_pipeline_cron import (
+            register_pipeline_cron,
+        )
+        register_pipeline_cron()
+        logger.info("quant_sys daily pipeline cron registered")
+
+        # quant_sys financials fetch cron — weekly Sunday 04:00
+        from app.extensions.quant_sys.data.financials_cron import (
+            register_financials_cron,
+        )
+        register_financials_cron()
+        logger.info("quant_sys financials cron registered")
+
+        # quant_sys macro data fetch cron — weekly Sunday 05:00
+        from app.extensions.quant_sys.data.macro_cron import (
+            register_macro_cron,
+        )
+        register_macro_cron()
+        logger.info("quant_sys macro cron registered")
+
+        # quant_sys weekly report cron — Saturday 10:00
+        from app.extensions.quant_sys.scheduler.weekly_report_cron import (
+            register_weekly_report_cron,
+        )
+        register_weekly_report_cron()
+        logger.info("quant_sys weekly report cron registered")
+
+        # quant_sys signal generation cron — Mon-Fri 17:15 (after pipeline)
+        from app.extensions.quant_sys.scheduler.signal_cron import (
+            register_signal_cron,
+        )
+        register_signal_cron()
+        logger.info("quant_sys signal generation cron registered")
     
     # Startup hooks (workers, strategy restore). Skipped for OpenAPI export / CI.
     skip_hooks = os.getenv("SKIP_STARTUP_HOOKS", "").strip().lower() in (

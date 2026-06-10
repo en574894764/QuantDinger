@@ -1,0 +1,27 @@
+# MCP Server Configuration
+# Local overrides in mcp.local.yaml
+
+quant_data:
+  description: "Quant System read-only data access"
+
+quant_bridge:
+  description: "Quant System controlled operations bridge"
+  allowed_operations:
+    submit_idea: write
+    list_ideas: read
+    update_idea_status: write
+    get_pending_signals: read
+    get_signal_detail: read
+    confirm_signal: write
+    reject_signal: write
+    defer_signal: write
+    force_execute_signal: write
+    request_strict_validation: write
+    get_validation_status: read
+    get_system_health: read
+    get_next_actions: read
+  blocked_operations:
+    - modify_risk_params
+    - force_execute_trade
+    - delete_data
+    - modify_strategy

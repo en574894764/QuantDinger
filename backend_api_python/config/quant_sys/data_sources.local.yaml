@@ -1,0 +1,8 @@
+tushare:
+  token: "72826744b6a3733e61cd602f4fd42fe56a6de0d5781ba77e0bfb929b"
+
+postgres:
+  quant_sys:
+    url: "postgresql://james@localhost:5432/quant_sys"
+  investassist:
+    url: "postgresql://james@localhost:5432/investassist"

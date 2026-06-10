@@ -1,0 +1,40 @@
+# 数据源配置
+# 敏感信息（API token）放在 data_sources.local.yaml 中
+
+tushare:
+  # token 在 data_sources.local.yaml 中配置
+  rate_limit: 200  # 每分钟最大请求数
+  max_retries: 3
+  retry_delay: 5   # 秒
+
+# PostgreSQL 数据源（连接信息在 data_sources.local.yaml 中）
+postgres:
+  # quant_sys: 本项目的独立数据库
+  # investassist: 上游数据源（每日同步用）
+  # url 在 data_sources.local.yaml 中配置
+
+akshare:
+  rate_limit: 50
+  max_retries: 3
+  retry_delay: 3
+
+# 数据更新调度（每天按此顺序拉取）
+update_schedule:
+  a_shares_daily:       # A股日线
+    time: "16:30"
+    enabled: true
+  a_shares_fundamental: # 财务数据
+    time: "17:00"
+    enabled: true
+  etf_daily:            # ETF日线
+    time: "16:30"
+    enabled: true
+  hk_connect_daily:     # 港股通日线
+    time: "16:30"
+    enabled: true
+  index_constituent:    # 指数成分股
+    time: "17:30"
+    enabled: true
+  macro:                # 宏观数据
+    time: "18:00"
+    enabled: true

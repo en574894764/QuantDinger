@@ -1,0 +1,15 @@
+# 推送渠道配置
+# 交互和通知统一由 Copilot System 侧管理（飞书 + Web UI）
+# 本文件保留作为配置占位，实际推送逻辑在 copilot 侧实现
+
+feishu:
+  enabled: true
+  # App ID / Secret 在 ~/.hermes/.env 中配置
+
+# 消息路由规则（由 Hermes cron + Skills 控制）
+routing:
+  trade_signal:    [feishu]    # 交易信号
+  risk_warning:    [feishu]    # 风控预警
+  daily_report:    [feishu]    # 日报
+  weekly_report:   [feishu]    # 周报
+  monthly_report:  [feishu]    # 月报
