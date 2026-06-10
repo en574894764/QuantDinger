@@ -26,8 +26,11 @@ logs/
 .env
 .env.local
 
-# Data (在 docker-compose 中挂载)
-data/memory/*.db
+# Quant data (mounted as volumes at runtime, NOT in image)
+data/processed/
+data/raw/
+data/pipeline_state.json
+data/system.db
 
 # Git
 .git/
