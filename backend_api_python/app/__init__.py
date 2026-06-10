@@ -405,7 +405,6 @@ def create_app(config_name='default'):
 
     from app.routes import register_routes
     register_routes(app)
-    register_routes(app)
     
     # === quant_sys extension — A-share data/risk/strategy/signals ===
     if os.getenv("QUANT_SYS_ENABLED", "").lower() in ("1", "true", "yes"):
