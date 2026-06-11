@@ -5,6 +5,7 @@ Does NOT modify any original QuantDinger code.
 """
 
 import logging
+from datetime import datetime
 
 from flask import Blueprint, jsonify, request
 
@@ -135,13 +136,76 @@ def pipeline_run():
 
 @quant_bp.route("/data/pipeline/status")
 def pipeline_status():
-    """Get the current daily pipeline state."""
+    """Get the current daily pipeline state — queries PG directly for data freshness."""
     try:
-        from app.extensions.quant_sys.data.pipeline_state import (
-            PipelineStateManager,
-        )
-        state = PipelineStateManager().load()
-        return jsonify(state)
+        from app.extensions.quant_sys.data.pipeline import get_pipeline_status
+
+        raw = get_pipeline_status()
+        last_date = raw.get("stock_daily", {}).get("last_date")
+        daily_count = raw.get("stock_daily", {}).get("count", 0)
+        stock_count = raw.get("stock_basic", {}).get("count", 0)
+        fin_count = raw.get("financials", {}).get("count", 0)
+
+        # Detect issues
+        issues = []
+        today = datetime.now()
+        if not last_date:
+            status = "missing"
+            issues.append("daily_quote 表无数据，数据管道可能从未运行")
+        else:
+            try:
+                last_dt = datetime.strptime(str(last_date)[:10], "%Y-%m-%d")
+                days_behind = (today - last_dt).days
+                if days_behind > 3:
+                    status = "stale"
+                    issues.append(f"数据滞后 {days_behind} 天（最新: {last_date}）")
+                else:
+                    status = "healthy"
+            except Exception:
+                status = "healthy" if daily_count > 0 else "unknown"
+
+        if daily_count == 0:
+            issues.append("daily_quote 表为空")
+            status = "missing"
+        if stock_count == 0:
+            issues.append("stocks 表为空")
+        if fin_count == 0:
+            issues.append("financial_indicator 表为空")
+
+        # Check index_daily freshness too
+        try:
+            import psycopg2
+            import os
+            db_url = os.environ.get(
+                "QUANT_SYS_DATABASE_URL",
+                "postgresql://james@host.docker.internal:5432/investassist",
+            )
+            conn = psycopg2.connect(db_url)
+            cur = conn.cursor()
+            cur.execute("SELECT MAX(trade_date) FROM index_daily")
+            idx_date = cur.fetchone()[0]
+            cur.close()
+            conn.close()
+            if idx_date:
+                idx_str = str(idx_date)[:10]
+                raw["index_daily"] = {"last_date": idx_str}
+                try:
+                    idx_dt = datetime.strptime(idx_str, "%Y-%m-%d")
+                    if (today - idx_dt).days > 3 and status == "healthy":
+                        status = "stale"
+                        issues.append(f"指数数据滞后（最新: {idx_str}）")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return jsonify({
+            "status": status,
+            "as_of": last_date,
+            "datasets": raw,
+            "issues": issues,
+            "checked_at": today.isoformat(),
+        })
     except Exception as e:
         logger.error("Pipeline status check failed: %s", e, exc_info=True)
         return jsonify({"status": "error", "error": str(e)}), 500

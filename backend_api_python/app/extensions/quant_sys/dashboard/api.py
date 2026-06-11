@@ -187,20 +187,21 @@ def get_market_overview() -> dict:
         # ── Index data (try index_daily table) ──────────────────────
         try:
             cur.execute(
-                """SELECT i.index_code, i.trade_date, i.close, i.pct_chg, i.vol, i.amount
+                """SELECT i.symbol, i.name, i.trade_date, i.close, i.pct_chg, i.volume, i.amount
                    FROM index_daily i
                    WHERE i.trade_date = %s
-                   ORDER BY i.index_code""",
+                   ORDER BY i.symbol""",
                 (latest_date,),
             )
             for r in cur.fetchall():
-                overview["indices"][r["index_code"]] = {
+                overview["indices"][r["symbol"]] = {
+                    "name": r["name"],
                     "close": float(r["close"]) if r["close"] else 0,
                     "pct_chg": float(r["pct_chg"]) if r["pct_chg"] else 0,
-                    "vol": float(r["vol"]) if r["vol"] else 0,
+                    "vol": float(r["volume"]) if r["volume"] else 0,
                 }
-        except Exception:
-            logger.debug("index_daily table not available, skipping indices")
+        except Exception as e:
+            logger.error("index_daily query failed: %s", e)
 
         cur.close()
     except Exception as e:
