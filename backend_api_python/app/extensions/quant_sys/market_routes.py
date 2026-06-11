@@ -197,52 +197,42 @@ def market_ranking():
             cur.execute(sql, (latest_date,))
             return [dict(r) for r in cur.fetchall()]
 
-        # Get advance/decline counts
+        # Get advance/decline counts (pct_chg stored as numeric)
         cur.execute("""
             SELECT
-                COUNT(*) FILTER (WHERE pct_chg > 0) AS advance,
-                COUNT(*) FILTER (WHERE pct_chg = 0) AS flat,
-                COUNT(*) FILTER (WHERE pct_chg < 0) AS decline,
-                COUNT(*) FILTER (WHERE pct_chg >= 9.8) AS limit_up,
-                COUNT(*) FILTER (WHERE pct_chg <= -9.8) AS limit_down
+                COUNT(*) FILTER (WHERE pct_chg::float > 0) AS advance,
+                COUNT(*) FILTER (WHERE pct_chg::float = 0) AS flat,
+                COUNT(*) FILTER (WHERE pct_chg::float < 0) AS decline,
+                COUNT(*) FILTER (WHERE pct_chg::float >= 9.8) AS limit_up,
+                COUNT(*) FILTER (WHERE pct_chg::float <= -9.8) AS limit_down
             FROM daily_quote WHERE trade_date = %s
         """, (latest_date,))
-        adv = cur.fetchone()
+        adv = dict(cur.fetchone()) if cur.rowcount > 0 else {}
 
         result = {
             "top_gainers": _fetch(
-                "SELECT d.ts_code, s.name, d.close, d.pct_chg, d.vol, d.amount, "
-                "CASE WHEN total_share > 0 THEN d.vol::float/total_share*100 ELSE NULL END AS turnover_rate "
+                "SELECT d.ts_code, s.name, d.close, d.pct_chg, d.vol, d.amount "
                 "FROM daily_quote d LEFT JOIN stocks s ON d.ts_code = s.ts_code "
-                "WHERE d.trade_date = %s AND d.pct_chg IS NOT NULL "
-                "ORDER BY d.pct_chg DESC LIMIT 20"
+                "WHERE d.trade_date = %s AND d.pct_chg::float IS NOT NULL "
+                "ORDER BY d.pct_chg::float DESC LIMIT 20"
             ),
             "top_losers": _fetch(
-                "SELECT d.ts_code, s.name, d.close, d.pct_chg, d.vol, d.amount, "
-                "CASE WHEN total_share > 0 THEN d.vol::float/total_share*100 ELSE NULL END AS turnover_rate "
+                "SELECT d.ts_code, s.name, d.close, d.pct_chg, d.vol, d.amount "
                 "FROM daily_quote d LEFT JOIN stocks s ON d.ts_code = s.ts_code "
-                "WHERE d.trade_date = %s AND d.pct_chg IS NOT NULL "
-                "ORDER BY d.pct_chg ASC LIMIT 20"
+                "WHERE d.trade_date = %s AND d.pct_chg::float IS NOT NULL "
+                "ORDER BY d.pct_chg::float ASC LIMIT 20"
             ),
             "volume_leaders": _fetch(
-                "SELECT d.ts_code, s.name, d.close, d.pct_chg, d.vol, d.amount, "
-                "CASE WHEN total_share > 0 THEN d.vol::float/total_share*100 ELSE NULL END AS turnover_rate "
+                "SELECT d.ts_code, s.name, d.close, d.pct_chg, d.vol, d.amount "
                 "FROM daily_quote d LEFT JOIN stocks s ON d.ts_code = s.ts_code "
                 "WHERE d.trade_date = %s AND d.amount IS NOT NULL "
-                "ORDER BY d.amount DESC LIMIT 20"
+                "ORDER BY d.amount::float DESC LIMIT 20"
             ),
-            "turnover_leaders": _fetch(
-                "SELECT d.ts_code, s.name, d.close, d.pct_chg, d.vol, d.amount, "
-                "CASE WHEN total_share > 0 THEN d.vol::float/total_share*100 ELSE NULL END AS turnover_rate "
-                "FROM daily_quote d LEFT JOIN stocks s ON d.ts_code = s.ts_code "
-                "WHERE d.trade_date = %s AND d.vol IS NOT NULL AND s.total_share > 0 "
-                "ORDER BY d.vol::float/s.total_share DESC LIMIT 20"
-            ),
-            "advance_count": adv["advance"] if adv else 0,
-            "flat_count": adv["flat"] if adv else 0,
-            "decline_count": adv["decline"] if adv else 0,
-            "limit_up_count": adv["limit_up"] if adv else 0,
-            "limit_down_count": adv["limit_down"] if adv else 0,
+            "advance_count": adv.get("advance", 0),
+            "flat_count": adv.get("flat", 0),
+            "decline_count": adv.get("decline", 0),
+            "limit_up_count": adv.get("limit_up", 0),
+            "limit_down_count": adv.get("limit_down", 0),
             "trade_date": latest_date[:10] if "-" in latest_date else f"{latest_date[:4]}-{latest_date[4:6]}-{latest_date[6:8]}",
         }
 
