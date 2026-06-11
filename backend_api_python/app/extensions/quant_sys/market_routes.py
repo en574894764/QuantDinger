@@ -286,3 +286,54 @@ def market_stocks():
 def init_app(app):
     """No-op — routes attached to quant_bp."""
     pass
+
+
+# ── Stock K-line (from daily_quote) ─────────────────────────────────────
+
+@quant_bp.route("/market/kline")
+def market_kline():
+    """Return OHLCV K-line data for a single stock from daily_quote."""
+    ts_code = request.args.get("symbol", "")
+    limit = request.args.get("limit", 200, type=int)
+
+    if not ts_code:
+        return jsonify({"error": "symbol required", "data": []}), 400
+
+    # Normalize ts_code
+    if not ts_code.endswith((".SH", ".SZ", ".BJ")):
+        if ts_code.startswith(("60", "68")):
+            ts_code = f"{ts_code}.SH"
+        elif ts_code.startswith(("00", "30")):
+            ts_code = f"{ts_code}.SZ"
+        elif ts_code.startswith("8"):
+            ts_code = f"{ts_code}.BJ"
+
+    try:
+        conn, cur = _get_pg_cur()
+        cur.execute("""
+            SELECT trade_date, open, high, low, close, vol, amount
+            FROM daily_quote
+            WHERE ts_code = %s
+            ORDER BY trade_date ASC
+            LIMIT %s
+        """, (ts_code, limit))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        result = []
+        for r in rows:
+            result.append({
+                "trade_date": str(r["trade_date"]),
+                "open": float(r["open"]) if r["open"] else 0,
+                "high": float(r["high"]) if r["high"] else 0,
+                "low": float(r["low"]) if r["low"] else 0,
+                "close": float(r["close"]) if r["close"] else 0,
+                "vol": float(r["vol"]) if r["vol"] else 0,
+                "amount": float(r["amount"]) if r["amount"] else 0,
+            })
+
+        return jsonify({"symbol": ts_code, "count": len(result), "data": result})
+    except Exception as e:
+        logger.error("kline failed: %s", e)
+        return jsonify({"error": str(e), "data": []}), 500
